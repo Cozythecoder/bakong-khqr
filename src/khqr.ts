@@ -13,6 +13,8 @@ import {
   PayloadFormatIndicator,
   GlobalUniqueIdentifier,
 } from "./sdk";
+import { request as httpsRequest } from "https";
+import { URL } from "url";
 
 export interface KHQROptions {
   /** Bakong Developer Token (required for API methods) */
@@ -143,54 +145,73 @@ export class KHQR {
   }
 
   /**
-   * Make a POST request to the Bakong API.
+   * Make a POST request to the Bakong API using Node.js https (like Python's http.client).
    * @param endpoint - API endpoint path
    * @param payload - Request body
    * @returns Response data
    */
-  private async postRequest<T>(endpoint: string, payload: unknown): Promise<T> {
+  private postRequest<T>(endpoint: string, payload: unknown): Promise<T> {
     this.checkBakongToken();
 
-    const url = new URL(endpoint, this.bakongApi);
-    const headers: Record<string, string> = {
-      Authorization: `Bearer ${this.bakongToken}`,
-      "Content-Type": "application/json",
-      "User-Agent": `bakong-khqr-ts/${VERSION} (+https://github.com/bakong-khqr); Mozilla/5.0`,
+    const parsedUrl = new URL(this.bakongApi);
+    const fullPath = parsedUrl.pathname + endpoint;
+    const payloadData = JSON.stringify(payload);
+
+    const options = {
+      hostname: parsedUrl.hostname,
+      port: 443,
+      path: fullPath,
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${this.bakongToken}`,
+        "Content-Type": "application/json",
+        "User-Agent": `bakong-khqr-ts/${VERSION} (+https://github.com/bakong-khqr); Mozilla/5.0`,
+        "Content-Length": Buffer.byteLength(payloadData),
+      },
     };
 
-    try {
-      const response = await fetch(url.toString(), {
-        method: "POST",
-        headers,
-        body: JSON.stringify(payload),
+    return new Promise((resolve, reject) => {
+      const req = httpsRequest(options, (res) => {
+        let data = "";
+
+        res.on("data", (chunk) => {
+          data += chunk;
+        });
+
+        res.on("end", () => {
+          if (res.statusCode === 200) {
+            try {
+              resolve(JSON.parse(data) as T);
+            } catch (e) {
+              reject(new Error(`Invalid JSON response: ${data}`));
+            }
+          } else if (res.statusCode === 400) {
+            reject(new Error("Bad request. Please check your input parameters and try again."));
+          } else if (res.statusCode === 401) {
+            reject(new Error("Your Developer Token is either incorrect or expired. Please renew it through Bakong Developer."));
+          } else if (res.statusCode === 403) {
+            reject(new Error("Bakong API only accepts requests from Cambodia IP addresses. Your IP may be blocked or restricted."));
+          } else if (res.statusCode === 404) {
+            reject(new Error("The requested Bakong API endpoint does not exist. Please check the endpoint URL."));
+          } else if (res.statusCode === 429) {
+            reject(new Error("Too many requests. Please wait a while before trying again."));
+          } else if (res.statusCode === 500) {
+            reject(new Error("Bakong server encountered an internal error. Please try again later."));
+          } else if (res.statusCode === 504) {
+            reject(new Error("Bakong server is busy, please try again later."));
+          } else {
+            reject(new Error(`Something went wrong. HTTP ${res.statusCode}: ${data}`));
+          }
+        });
       });
 
-      if (response.status === 200) {
-        return (await response.json()) as T;
-      } else if (response.status === 400) {
-        throw new Error("Bad request. Please check your input parameters and try again.");
-      } else if (response.status === 401) {
-        throw new Error("Your Developer Token is either incorrect or expired. Please renew it through Bakong Developer.");
-      } else if (response.status === 403) {
-        throw new Error("Bakong API only accepts requests from Cambodia IP addresses. Your IP may be blocked or restricted.");
-      } else if (response.status === 404) {
-        throw new Error("The requested Bakong API endpoint does not exist. Please check the endpoint URL.");
-      } else if (response.status === 429) {
-        throw new Error("Too many requests. Please wait a while before trying again.");
-      } else if (response.status === 500) {
-        throw new Error("Bakong server encountered an internal error. Please try again later.");
-      } else if (response.status === 504) {
-        throw new Error("Bakong server is busy, please try again later.");
-      } else {
-        const text = await response.text();
-        throw new Error(`Something went wrong. HTTP ${response.status}: ${text}`);
-      }
-    } catch (error) {
-      if (error instanceof Error) {
-        throw error;
-      }
-      throw new Error(String(error));
-    }
+      req.on("error", (error) => {
+        reject(error);
+      });
+
+      req.write(payloadData);
+      req.end();
+    });
   }
 
   /**
